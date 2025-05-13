@@ -1,0 +1,109 @@
+---
+- name: Install and configure NGINX with HTTPs on Windows EC2 Instance
+  hosts: windows-host
+  gather_facts: yes 
+
+  vars:
+    nginx_root: 'C:\nginx'
+    nginx_version: 'nginx-1.24.0'
+    nginx_path: 'C:\nginx\nginx-1.24.0'
+    ssl_path: 'C:\nginx\ssl'
+
+  tasks:
+    - name: Ensure required directories exisits
+      win_file:
+        path: "{{ item }}"
+        state: directory
+      loop:
+        - "{{ nginx_path }}"
+        - "{{ nginx_path }}/conf"
+        - "{{ nginx_path }}/logs"
+        - "{{ ssl_path }}"
+
+    - name: Unzip nginx 
+      win_unzip:
+        src: "{{ playbook_dir }}\\files\\nginx-1.24.0.zip"
+        dest: "{{ nginx_root }}"
+        creates: "{{ nginx_path }}\\nginx.exe"
+
+    - name: Ensure OpenSSL is installed
+      win_chocolatey:
+        name: openssl
+        state: present
+
+    - name: Generate a self-signed SSL certificate
+      win_shell: |
+        $ErrorActionPreference = 'Stop'
+
+        # Create the certificate
+        $cert = New-SelfSignedCertificate -DnsName "localhost" -CertStoreLocation "Cert:\LocalMachine\My"  
+        if (-not $cert) { throw "Failed to generate certificate" }
+
+        $pwd = ConvertTo-SecureString -String "P@ssw0rd123" -Force -AsPlainText
+        $sslDir   = 'C:\nginx\ssl'
+        $pfxPath  = Join-Path $sslDir 'nginx.pfx'
+        $certPath = Join-Path $sslDir 'cert.crt'
+        $keyPath  = Join-Path $sslDir 'key.key'
+        $pemPath  = Join-Path $sslDir 'nginx.pem'
+
+        # Ensure directory exisits
+        New-Item -ItemType Directory -Force -Path $sslDir | Out-Null
+
+        # Export PFX and Certificate
+        Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password $pwd
+        if (-not (Test-Path $pfxPath)) { 
+          throw "Failed to generate PFX" 
+        }
+
+        # Convert PFX to PEM format
+        $openssl = 'C:\\Program Files\\OpenSSL-Win64\\bin\\openssl.exe'
+
+        # Export cert only
+        & $openssl pkcs12 -in $pfxPath -clcerts -nokeys -out $certPath -password pass:P@ssw0rd123
+
+        # Export key only
+        & $openssl pkcs12 -in $pfxPath -nocerts -nodes   -out $keyPath -password pass:P@ssw0rd123
+
+        if ((Test-Path $certPath) -and (Test-Path $keyPath)) {
+          Get-Content $keyPath, $certPath | Set-Content -Path $pemPath -Encoding Ascii
+        } else {
+          throw "Failed to generate certificate or key missing after OpenSSL export "
+        }
+      args:
+        executable: powershell.exe
+
+    - name: Confirm nginx.pem file exisits
+      win_stat:
+        path: C:\nginx\ssl\nginx.pem
+      register: pem_stat
+
+    - name: Show contents of nginx.cert (PEM check)
+      win_shell: Get-Content -Path C:\nginx\ssl\nginx.pem
+      when: pem_stat.stat.exists
+      register: nginx_cert_content
+
+    - name: Output nginx.cert content to verify PEM format
+      debug:
+        var: nginx_cert_content.stdout_lines
+      when: pem_stat.stat.exists
+
+    - name: Deploy nginx.conf with HTTPs (on port 443 using .pfx) 
+      win_template:
+        src: templates/nginx-ssl.conf.j2
+        dest: "{{ nginx_path }}\\conf\\nginx.conf"
+
+    - name: Start nginx service in the background
+      win_shell: |
+        Start-Process "nginx.exe" -ArgumentList "-c C:\nginx\nginx-1.24.0\conf\nginx.conf" -WorkingDirectory "C:\nginx\nginx-1.24.0"
+      args:
+        chdir: 'C:\nginx\nginx-1.24.0'
+
+    - name: Verify nginx service is running
+      win_shell: Get-Process nginx -ErrorAction SilentlyContinue 
+      register: nginx_status
+      changed_when: false
+
+    - name: Show nginx process output 
+      debug:
+        var: nginx_status.stdout
+

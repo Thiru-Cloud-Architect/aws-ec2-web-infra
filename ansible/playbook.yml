@@ -1,0 +1,53 @@
+---
+- name: Provision NGINX with HTTPS 
+  hosts: all
+  become: true
+
+  tasks:
+    - name: Install NGINX
+      apt:
+        name: nginx
+        state: present
+        update_cache: yes
+
+    - name: Create directory for SSL
+      file:
+        path: /etc/nginx/ssl
+        state: directory
+        mode: '0755'
+
+    - name: Create private directory for SSL key 
+      file:
+        path: /etc/nginx/ssl/private
+        state: directory
+        mode: '0755'
+
+    - name: Create self-signed SSL certificate 
+      shell: |
+        openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+          -keyout /etc/nginx/ssl/private/nginx-selfsigned.key \
+          -out /etc/nginx/ssl/nginx-selfsigned.crt \
+          -subj "/CN=localhost"
+      args:
+        creates: /etc/nginx/ssl/nginx-selfsigned.crt
+
+    - name: Create basic HTTPS NGINX config
+      copy:
+        dest: /etc/nginx/sites-available/default
+        content: |
+          server {
+            listen 443 ssl default_server;
+            server_name _;
+            ssl_certificate /etc/nginx/ssl/nginx-selfsigned.crt;
+            ssl_certificate_key /etc/nginx/ssl/private/nginx-selfsigned.key;
+            location / {
+              root /var/www/html;
+              index index.html index.htm;
+            }
+          }
+
+    - name: Restart NGINX 
+      service:
+        name: nginx
+        state: restarted
+
